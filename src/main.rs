@@ -216,15 +216,16 @@ impl System {
 
     fn plan(&mut self) {
         while self.unplanned_tasks.len() > 0 {
-            let Task {id: task_id, w, parents, ..} = self.rmv_earliest();
+            let Task {id: task_id, w: task_w, parents, ..} = self.rmv_earliest();
             // No parents => can start immediately => into a new processor
             if parents.is_empty() {
                 let place = Place {proc: self.rightmost_proc.clone(), tick: 0};
-                self.place(Cell::Taken(task_id), place, w);
+                self.place(Cell::Taken(task_id), place, task_w);
                 continue;
             }
 
-            let proc = self.find_best_proc(&parents);
+            println!(" Finding for task {}", task_id);
+            let proc = self.find_best_proc(task_w, &parents);
             // Place data transmissions -- for each parent put transmission paths
             // let mut tick; // there is at leats one parentA => will be initialized for sure
             for (parent_task_id, link_w) in parents.iter() {
@@ -285,8 +286,8 @@ impl System {
 
             // Have received all data for this task => can start it
             let start = self.processors.get(&proc).unwrap().len() as u32;
-            self.place(Cell::Taken(task_id), Place {proc: proc, tick: start}, w);
-            break;
+            self.place(Cell::Taken(task_id), Place {proc: proc, tick: start}, task_w);
+            // break;
         }
 
         self.print_planning();
@@ -319,21 +320,55 @@ impl System {
         }
     }
 
-    fn find_best_proc(&self, parents: &Vec<(TaskId, Weight)>) -> ProcId {
-        let eval_proc = |proc_id: i32| -> u32 {
-            parents.iter()
+    fn find_consecutive_block(&self, proc: ProcId, w: Weight, s: StartTime) -> StartTime {
+        let processor = self.processors.get(&proc).unwrap();
+        for i in (s as usize)..processor.len() {
+            if let Cell::Free = processor.get(i).unwrap() {
+                let mut all_good = true;
+                for ii in (i + 1)..(i + w as usize) {
+                    if let Cell::Free = processor.get(ii).unwrap_or(&Cell::Free) {
+                        continue;
+                    } else {
+                        all_good = false;
+                        break;
+                    }
+                }
+                if all_good {
+                    return i as u32;
+                }
+            }
+        }
+
+        if (s as usize) >= processor.len() {s} else {processor.len() as u32}
+    }
+
+    fn find_best_proc(&self, w: Weight, parents: &Vec<(TaskId, Weight)>) -> ProcId {
+        let eval_proc = |proc_id: i32, start_time: StartTime| -> u32 {
+            let transmission_score: u32 = parents.iter()
                 .map(|(task_id, w)| {
                     let other_proc_id = self.start_times.get(task_id).expect("Parent not planned yet").0;
                     let dst: u32 = (proc_id - other_proc_id).abs() as u32;
                     dst * w
                 })
-                .sum()
+                .sum();
+                // println!("Trans {}", transmission_score);
+            self.find_consecutive_block(proc_id, w, start_time) + transmission_score * 2
         };
 
+        let start: u32 = parents.iter()
+            .map(|(task_id, _)| {
+                let (_, start_time, w) = self.start_times.get(task_id).unwrap();
+                start_time + w
+            })
+            .max()
+            .unwrap();
+        println!("Start at {}", start);
+
         (self.leftmost_proc..=self.rightmost_proc)
-            .map(|proc| (proc, eval_proc(proc)))
-            // .inspect(|(proc, score)| println!("Considering score={} for proc={}", score, proc))
+            .map(|proc| (proc, eval_proc(proc, start)))
+            .inspect(|(proc, score)| println!("Considering score={} for proc={}", score, proc))
             .min_by(|(_, score1), (_, score2)| score1.cmp(score2))
+            .map(|(proc, score)| {println!("  Settling for score={} for proc={}", score, proc); (proc, score)})
             .map(|(index, _)| index)
             .unwrap() as i32
     }
@@ -348,12 +383,6 @@ fn main() {
     let mut system = System::new(tasks_from(populate_vertices(), populate_links()));
     system.plan();
 }
-
-// fn cumulative_weight(vertices: &Vec<Vertex>) -> u32 {
-//     vertices.iter()
-//         .map(|Vertex{w: Weight(w), ..}| w)
-//         .sum()
-// }
 
 fn populate_vertices() -> Vec<Vertex> {
     vec![
