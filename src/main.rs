@@ -1,9 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
 
-// #[derive(PartialEq, Eq, Ord, PartialOrd)]
-struct VertId(u32);
-
 struct Vertex {
     id: VertId,
     w: Weight,
@@ -15,15 +12,17 @@ struct Link {
     w: Weight,
 }
 
-type ProcId = i32;
+// #[derive(PartialEq, Eq, Ord, PartialOrd)]
 
+type VertId = u32;
+type ProcId = i32;
 type Tick = u32;
 type TaskId = u32;
 type StartTime = u32;
 type Weight = u32;
 type Importance = u32;
 
-#[derive(Clone)]
+#[derive(PartialEq, Eq, Clone)]
 enum Cell {
     Free,
     Taken(TaskId),
@@ -55,16 +54,16 @@ fn tasks_from(vertices: Vec<Vertex>, links: Vec<Link>) -> Vec<Task> {
     let length = vertices.len() as u32;
 
     // Create tasks
-    for Vertex {id: VertId(v_index), w} in vertices.into_iter() {
-        if v_index >= length {
+    for Vertex { id, w } in vertices.into_iter() {
+        if id >= length {
             panic!("Using VertId beyond upper bound.")
         }
-        if v_index != (tasks.len() as u32) {
+        if id != (tasks.len() as u32) {
             panic!("Pushing for wrong index");
         }
 
         tasks.push(Task {
-            id: v_index,
+            id: id,
             w: w,
             imp: 0,
             children: Vec::new(),
@@ -73,61 +72,58 @@ fn tasks_from(vertices: Vec<Vertex>, links: Vec<Link>) -> Vec<Task> {
     }
 
     // Add links
-    for Link {src: VertId(src), dst: VertId(dst), w} in links.into_iter() {
+    for Link { src, dst, w } in links.into_iter() {
         if src >= (tasks.len() as u32) || dst >= (tasks.len() as u32) {
             panic!("Link from or to out-of-bounds Vertex");
         }
-        tasks[src as usize].children.push((dst, w.clone()));
+        tasks[src as usize].children.push((dst, w));
         tasks[dst as usize].parents.push((src, w));
     }
 
     // Set importance
     // Assumes that at each iteration there will be at least 1 Task whose all
     // children have their Importance set. Utilizes exactly 1 such Task at each iteration.
-    let mut set_amount = 0;
-    while set_amount < tasks.len() {
-        let mut res = (0, 0);
-        'tasks_loop: for (index, task) in tasks.iter().enumerate() {
-            if task.imp == 0 { // not set (not computed) yet
-                let mut sum = task.w.clone();
-                for (t_id, _) in task.children.iter() {
-                    let imp = tasks[*t_id as usize].imp;
-                    if imp == 0 {
-                        continue 'tasks_loop;
-                    } else {
-                        sum += imp;
-                    }
-                }
-                res = (index, sum);
-                break 'tasks_loop; // done for this loop
-            } else {
-                continue 'tasks_loop; // nothing to do here
-            }
-        }
-        // Assumes to_set has been set
-        let (index, imp) = res;
-        tasks[index].imp = imp;
-        set_amount += 1;
+    for _ in 0..tasks.len() {
+        let (index, imp) = tasks
+            .iter()
+            .filter(|Task { imp, .. }| *imp == 0)
+            .find_map(
+                |Task { id, w, children, .. }| {
+                    children.iter()
+                        .try_fold(w.clone(), |acc, &(child_id, _)| {
+                            let imp = tasks[child_id as usize].imp;
+                            if imp != 0 {
+                                Some(acc + imp)
+                            } else {
+                                None
+                            }
+                        })
+                        .and_then(|imp| Some((id.clone(), imp)))
+                },
+            )
+            .unwrap(); // can safely unwrap because of the assumption described above
+        tasks[index as usize].imp = imp;
+        // println!("{} for {}", imp, index);
     }
 
     tasks
 }
 
-fn print_tasks(tasks: &Vec<Task>) {
-    for Task {id, w, children, parents, imp} in tasks.iter() {
-        println!("Task #{} [{}] <{}>:", id, w, imp);
-        print!("\t->");
-        for (dst, w) in children.iter() {
-            print!(" #{}[{}]", dst, w);
-        }
-        println!();
-        print!("\t<-");
-        for (src, w) in parents.iter() {
-            print!(" #{}[{}]", src, w);
-        }
-        println!();
-    }
-}
+// fn print_tasks(tasks: &Vec<Task>) {
+//     for Task {id, w, children, parents, imp} in tasks.iter() {
+//         println!("Task #{} [{}] <{}>:", id, w, imp);
+//         print!("\t->");
+//         for (dst, w) in children.iter() {
+//             print!(" #{}[{}]", dst, w);
+//         }
+//         println!();
+//         print!("\t<-");
+//         for (src, w) in parents.iter() {
+//             print!(" #{}[{}]", src, w);
+//         }
+//         println!();
+//     }
+// }
 
 struct Place {
     proc: ProcId,
@@ -225,14 +221,13 @@ impl System {
             }
 
             println!(" Finding for task {}", task_id);
-            let proc = self.find_best_proc(task_w, &parents);
+            let (proc, mut task_start) = self.find_best_proc(task_w, &parents);
             // Place data transmissions -- for each parent put transmission paths
-            // let mut tick; // there is at leats one parentA => will be initialized for sure
             for (parent_task_id, link_w) in parents.iter() {
                 let (parent_proc, parent_start, parent_w) =
                     self.start_times.get(parent_task_id).unwrap().clone();
                 if proc == parent_proc {
-                    continue; // Nothing to transmit
+                    continue; // on the same processor => nothing to transmit
                 }
                 // Hot to get from parent to proc
                 let paths: Vec<(i32, i32)> = {
@@ -263,45 +258,46 @@ impl System {
                         if found {break};
                         tick += 1;
                     }
-                    // Enlarge each Vec of Cells if needed
-                    {
-                        let mut enlarge = |proc_id| {
-                            let processor = self.processors.get_mut(proc_id).unwrap();
-                            while processor.len() < (tick + *link_w as usize) {
-                                // println!("Pushing for {} to {}", proc_id, processor.len());
-                                processor.push(Cell::Free);
-                            }
-                        };
-                        enlarge(&src);
-                        enlarge(&dst);
-                    }
                     // Actually place the transmission
                     self.place(Cell::Snd(task_id), Place {proc: src, tick: tick as u32}, *link_w);
                     self.place(Cell::Rcv(task_id), Place {proc: dst, tick: tick as u32}, *link_w);
 
                     tick += *link_w as usize;
                 }
-                // break;
+                // _tick_ now contains the tick when the data transmission from
+                // current parent has ended. The actual start time is thus the max
+                // of all such _tick_s.
+                task_start = std::cmp::max(task_start, tick as u32);
             }
 
             // Have received all data for this task => can start it
-            let start = self.processors.get(&proc).unwrap().len() as u32;
-            self.place(Cell::Taken(task_id), Place {proc: proc, tick: start}, task_w);
-            // break;
+            self.place(Cell::Taken(task_id), Place {proc: proc, tick: task_start}, task_w);
         }
 
         self.print_planning();
     }
 
-    fn place(&mut self, cell: Cell, Place {proc, tick}: Place, amount: u32) {
-        for curr in tick..(tick + amount) {
+    fn place(&mut self, cell: Cell, Place { proc, tick }: Place, amount: u32) {
+        {
             let processor = self.processors.get_mut(&proc).unwrap();
-            let cell = cell.clone();
+            while (processor.len() as u32) < tick {
+                // create cells up to _tick_
+                processor.push(Cell::Free);
+            }
+            let mut start = tick;
+            while processor.get(start as usize).unwrap_or(&Cell::Free) != &Cell::Free {
+                start += 1; // find first empty spacce (or the end, which is empty as well)
+            }
 
-            if curr >= (processor.len() as u32) {
-                processor.push(cell);
-            } else {
-                processor[curr as usize] = cell;
+            for curr in start..(start + amount) {
+                // let processor = self.processors.get_mut(&proc).unwrap();
+                let cell = cell.clone();
+
+                if curr >= (processor.len() as u32) {
+                    processor.push(cell);
+                } else {
+                    processor[curr as usize] = cell;
+                }
             }
         }
 
@@ -322,6 +318,8 @@ impl System {
 
     fn find_consecutive_block(&self, proc: ProcId, w: Weight, s: StartTime) -> StartTime {
         let processor = self.processors.get(&proc).unwrap();
+        if s as usize >= processor.len() {return s;}
+
         for i in (s as usize)..processor.len() {
             if let Cell::Free = processor.get(i).unwrap() {
                 let mut all_good = true;
@@ -333,16 +331,14 @@ impl System {
                         break;
                     }
                 }
-                if all_good {
-                    return i as u32;
-                }
+                if all_good { return i as u32; }
             }
         }
 
-        if (s as usize) >= processor.len() {s} else {processor.len() as u32}
+        (processor.len() as u32)
     }
 
-    fn find_best_proc(&self, w: Weight, parents: &Vec<(TaskId, Weight)>) -> ProcId {
+    fn find_best_proc(&self, w: Weight, parents: &Vec<(TaskId, Weight)>) -> (ProcId, StartTime) {
         let eval_proc = |proc_id: i32, start_time: StartTime| -> u32 {
             let transmission_score: u32 = parents.iter()
                 .map(|(task_id, w)| {
@@ -352,25 +348,26 @@ impl System {
                 })
                 .sum();
                 // println!("Trans {}", transmission_score);
-            self.find_consecutive_block(proc_id, w, start_time) + transmission_score * 2
+            self.find_consecutive_block(proc_id, w, start_time) + transmission_score * 1
         };
 
         let start: u32 = parents.iter()
             .map(|(task_id, _)| {
-                let (_, start_time, w) = self.start_times.get(task_id).unwrap();
-                start_time + w
+                let (_, parent_start_time, parent_w) = self.start_times.get(task_id).unwrap();
+                parent_start_time + parent_w
             })
             .max()
             .unwrap();
         println!("Start at {}", start);
 
-        (self.leftmost_proc..=self.rightmost_proc)
+        ((self.leftmost_proc..=self.rightmost_proc)
             .map(|proc| (proc, eval_proc(proc, start)))
             .inspect(|(proc, score)| println!("Considering score={} for proc={}", score, proc))
             .min_by(|(_, score1), (_, score2)| score1.cmp(score2))
-            .map(|(proc, score)| {println!("  Settling for score={} for proc={}", score, proc); (proc, score)})
+            // .map(|(proc, score)| {println!("  Settling for score={} for proc={}", score, proc); (proc, score)})
             .map(|(index, _)| index)
-            .unwrap() as i32
+            .unwrap() as i32,
+        start)
     }
 
     fn rmv_earliest(&mut self) -> Task {
@@ -380,38 +377,37 @@ impl System {
 }
 
 fn main() {
-    let mut system = System::new(tasks_from(populate_vertices(), populate_links()));
-    system.plan();
+    System::new(tasks_from(populate_vertices(), populate_links())).plan();
 }
 
 fn populate_vertices() -> Vec<Vertex> {
     vec![
         Vertex {
-            id: VertId(0),
+            id: 0,
             w: 3,
         },
         Vertex {
-            id: VertId(1),
+            id: 1,
             w: 4,
         },
         Vertex {
-            id: VertId(2),
+            id: 2,
             w: 5,
         },
         Vertex {
-            id: VertId(3),
+            id: 3,
             w: 3,
         },
         Vertex {
-            id: VertId(4),
+            id: 4,
             w: 3,
         },
         Vertex {
-            id: VertId(5),
+            id: 5,
             w: 2,
         },
         Vertex {
-            id: VertId(6),
+            id: 6,
             w: 4,
         },
     ]
@@ -420,38 +416,38 @@ fn populate_vertices() -> Vec<Vertex> {
 fn populate_links() -> Vec<Link> {
     vec![
         Link {
-            src: VertId(0),
-            dst: VertId(3),
+            src: 0,
+            dst: 3,
             w: 1,
         },
         Link {
-            src: VertId(0),
-            dst: VertId(2),
+            src: 0,
+            dst: 2,
             w: 2,
         },
         Link {
-            src: VertId(1),
-            dst: VertId(2),
+            src: 1,
+            dst: 2,
             w: 1,
         },
         Link {
-            src: VertId(1),
-            dst: VertId(6),
+            src: 1,
+            dst: 6,
             w: 2,
         },
         Link {
-            src: VertId(3),
-            dst: VertId(4),
+            src: 3,
+            dst: 4,
             w: 1,
         },
         Link {
-            src: VertId(3),
-            dst: VertId(5),
+            src: 3,
+            dst: 5,
             w: 2,
         },
         Link {
-            src: VertId(2),
-            dst: VertId(5),
+            src: 2,
+            dst: 5,
             w: 1,
         },
     ]
