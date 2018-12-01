@@ -1,6 +1,8 @@
 #!/usr/bin/zsh
 
-rustc src/main.rs
-./main
+cargo run
 
-rm -f main
+# rustc src/main.rs
+# ./main
+#
+# rm -f main

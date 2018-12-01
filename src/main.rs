@@ -1,6 +1,11 @@
 use std::collections::HashMap;
 use std::fmt;
 
+extern crate rand;
+use rand::prelude::*;
+// use rand::rngs::StdRng;
+
+#[derive(Debug)]
 struct Vertex {
     id: VertId,
     w: Weight,
@@ -109,21 +114,21 @@ fn tasks_from(vertices: Vec<Vertex>, links: Vec<Link>) -> Vec<Task> {
     tasks
 }
 
-// fn print_tasks(tasks: &Vec<Task>) {
-//     for Task {id, w, children, parents, imp} in tasks.iter() {
-//         println!("Task #{} [{}] <{}>:", id, w, imp);
-//         print!("\t->");
-//         for (dst, w) in children.iter() {
-//             print!(" #{}[{}]", dst, w);
-//         }
-//         println!();
-//         print!("\t<-");
-//         for (src, w) in parents.iter() {
-//             print!(" #{}[{}]", src, w);
-//         }
-//         println!();
-//     }
-// }
+fn print_tasks(tasks: &Vec<Task>) {
+    for Task {id, w, children, parents, imp} in tasks.iter() {
+        println!("Task #{} [{}] <{}>:", id, w, imp);
+        print!("\t->");
+        for (dst, w) in children.iter() {
+            print!(" #{}[{}]", dst, w);
+        }
+        println!();
+        print!("\t<-");
+        for (src, w) in parents.iter() {
+            print!(" #{}[{}]", src, w);
+        }
+        println!();
+    }
+}
 
 struct Place {
     proc: ProcId,
@@ -220,7 +225,7 @@ impl System {
                 continue;
             }
 
-            println!(" Finding for task {}", task_id);
+            // println!(" Finding for task {}", task_id);
             let (proc, mut task_start) = self.find_best_proc(task_w, &parents);
             // Place data transmissions -- for each parent put transmission paths
             for (parent_task_id, link_w) in parents.iter() {
@@ -358,11 +363,11 @@ impl System {
             })
             .max()
             .unwrap();
-        println!("Start at {}", start);
+        // println!("Start at {}", start);
 
         ((self.leftmost_proc..=self.rightmost_proc)
             .map(|proc| (proc, eval_proc(proc, start)))
-            .inspect(|(proc, score)| println!("Considering score={} for proc={}", score, proc))
+            // .inspect(|(proc, score)| println!("Considering score={} for proc={}", score, proc))
             .min_by(|(_, score1), (_, score2)| score1.cmp(score2))
             // .map(|(proc, score)| {println!("  Settling for score={} for proc={}", score, proc); (proc, score)})
             .map(|(index, _)| index)
@@ -371,13 +376,147 @@ impl System {
     }
 
     fn rmv_earliest(&mut self) -> Task {
-        // TODO
-        self.unplanned_tasks.remove(0)
+        let max = self.unplanned_tasks.iter()
+            .enumerate()
+            .max_by_key(|(_, Task {imp, ..})| imp)
+            .map(|(index, _)| index)
+            .unwrap();
+        self.unplanned_tasks.remove(max)
     }
 }
 
 fn main() {
-    System::new(tasks_from(populate_vertices(), populate_links())).plan();
+    let (vert, links) = populate_random();
+    let tasks = tasks_from(vert, links);
+    print_tasks(&tasks);
+
+    System::new(tasks).plan();
+    // System::new(tasks_from(populate_vertices(), populate_links())).plan();
+}
+
+fn populate_random() -> (Vec<Vertex>, Vec<Link>) {
+    let vertex_count = 8;
+    let min_per_layer = 1;
+    let max_per_layer = vertex_count / 2;
+    let min_vertex_weight = 1;
+    let max_vertex_weight = 8;
+    let seed = [1,2,3,4, 5,6,7,8, 9,10,11,12, 13,14,15,16];
+    let mut rng = SmallRng::from_seed(seed);
+
+    // Vertices
+    let mut done_vertices_count = 0;
+    let mut id: VertId = 0;
+    let mut layers = Vec::new();
+    while done_vertices_count < vertex_count {
+        let mut layer = Vec::new();
+        let count: u32 = {
+            let r = rng.gen_range(min_per_layer, max_per_layer + 1);
+            let left = vertex_count - done_vertices_count;
+            if left < r {left} else {r}
+        };
+        for _ in 0..count {
+            let weight: Weight = rng.gen_range(min_vertex_weight, max_vertex_weight + 1);
+            layer.push(Vertex {id: id, w: weight});
+            id += 1;
+        }
+        done_vertices_count += count;
+
+        layers.push(layer);
+    }
+    println!("{:#?}", layers);
+
+    // Links
+    let links_count = (vertex_count * (vertex_count - 1) / 2) / 2;
+    println!("Will create {} links", links_count);
+    let min_link_weight = 1;
+    let max_link_weight = 2;
+    let mut links = Vec::new();
+    // There must be at least one path with a Vertex in each layer.
+    // Gen that path. Since all vertices are random,
+    // can just take 0th at each layer at this stage
+    // for i in 1..layers.len() {
+    //     let src_index = layers.get(i - 1).unwrap().get(0).unwrap().id.clone();
+    //     let dst_index = layers.get(i    ).unwrap().get(0).unwrap().id.clone();
+    //     let weight: u32 = rng.gen_range(min_link_weight, max_link_weight + 1);
+    //     links.push(Link { src: src_index, dst: dst_index, w: weight });
+    // }
+    // let mut done_links_count = layers.len() - 1;
+    let belongs_to_chunk = |id: u32, chunks: &Vec<Vec<VertId>>| -> Option<usize> {
+        chunks.iter()
+            .enumerate()
+            .find_map(|(index, chunk)|
+                if chunk.iter()
+                    .find(|&& x| x == id)
+                    .is_some() {Some(index)}
+                else {None}
+            )
+    };
+    let mut done_links_count = 0;
+    let mut chunks = Vec::new();
+    let mut converged = false;
+    while !converged || done_links_count < links_count {
+        // if !converged { println!("Have chunks: {:#?}", chunks); }
+        let layer_src_index = rng.gen_range(0, layers.len() - 1);
+        let layer_dst_index = rng.gen_range(layer_src_index + 1, layers.len());
+        let layer_src = layers.get(layer_src_index).unwrap();
+        let layer_dst = layers.get(layer_dst_index).unwrap();
+        let src_index = layer_src.get(rng.gen_range(0, layer_src.len())).unwrap().id.clone();
+        let dst_index = layer_dst.get(rng.gen_range(0, layer_dst.len())).unwrap().id.clone();
+        // Retry if such link already exists
+        if links.iter()
+            .find(|&& Link {src, dst, ..}| (src == src_index) && (dst == dst_index))
+            .is_some() { continue; }
+        let weight: u32 = rng.gen_range(min_link_weight, max_link_weight + 1);
+        links.push(Link { src: src_index, dst: dst_index, w: weight });
+        done_links_count += 1;
+
+        // Have nothing to trach if have already converged
+        if converged { continue; }
+
+        let chunk_src = belongs_to_chunk(src_index, &chunks);
+        let chunk_dst = belongs_to_chunk(dst_index, &chunks);
+        // println!("Have: {} and {}", src_index, dst_index);
+        if chunk_src.is_none() && chunk_dst.is_none() {
+            // Create new chunk
+            // println!("Creating new chunk");
+            chunks.push(vec![src_index, dst_index]);
+        } else if chunk_src.is_none() && chunk_dst.is_some() {
+            // Add src to dst_chunk
+            // println!("Adding src to dst");
+            chunks.get_mut(chunk_dst.unwrap()).unwrap().push(src_index);
+        } else if chunk_src.is_some() && chunk_dst.is_none() {
+            // Add dst to src_chunk
+            // println!("Adding dst to src");
+            chunks.get_mut(chunk_src.unwrap()).unwrap().push(dst_index);
+        } else { // both Some
+            let src = chunk_src.unwrap();
+            let dst = chunk_dst.unwrap();
+            // println!("{} , {}", src, dst);
+            if src != dst {
+                // println!("Not same, merging");
+                // Merge chunks
+                let mut other = chunks.remove(dst);
+                chunks.get_mut(if dst < src {src - 1} else {src}).unwrap().append(&mut other);
+
+                // Check if all are connected
+                if chunks.len() == 1 {
+                    let chunk = chunks.get(0).unwrap();
+                    let all_present = layers.iter().flatten()
+                        .map(|Vertex {id, ..}| chunk.iter().find(|&&x| &x == id).is_some())
+                        .all(|found| found);
+                    if all_present {
+                        converged = true;
+                    }
+                }
+            } else {
+                println!("Same, nothing");
+            }
+        }
+    }
+
+    println!("Done {} links total", done_links_count);
+
+    (layers.into_iter().flatten().collect(), links)
 }
 
 fn populate_vertices() -> Vec<Vertex> {
