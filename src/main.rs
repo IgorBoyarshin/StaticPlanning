@@ -376,22 +376,22 @@ impl System {
     }
 
     fn rmv_earliest(&mut self) -> Task {
-        let max = self.unplanned_tasks.iter()
-            .enumerate()
-            .max_by_key(|(_, Task {imp, ..})| imp)
-            .map(|(index, _)| index)
-            .unwrap();
-        self.unplanned_tasks.remove(max)
+        self.unplanned_tasks.remove(0)
+        // let max = self.unplanned_tasks.iter()
+        //     .enumerate()
+        //     .max_by_key(|(_, Task {imp, ..})| imp)
+        //     .map(|(index, _)| index)
+        //     .unwrap();
+        // self.unplanned_tasks.remove(max)
     }
 }
 
 fn main() {
-    let (vert, links) = populate_random();
-    let tasks = tasks_from(vert, links);
-    print_tasks(&tasks);
-
-    System::new(tasks).plan();
-    // System::new(tasks_from(populate_vertices(), populate_links())).plan();
+    // let (vert, links) = populate_random();
+    // let tasks = tasks_from(vert, links);
+    // print_tasks(&tasks);
+    // System::new(tasks).plan();
+    System::new(tasks_from(populate_vertices(), populate_links())).plan();
 }
 
 fn populate_random() -> (Vec<Vertex>, Vec<Link>) {
