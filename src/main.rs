@@ -220,12 +220,13 @@ impl System {
             let Task {id: task_id, w: task_w, parents, ..} = self.rmv_earliest();
             // No parents => can start immediately => into a new processor
             if parents.is_empty() {
-                let place = Place {proc: self.rightmost_proc.clone(), tick: 0};
+                let place = Place {proc: self.leftmost_proc.clone(), tick: 0};
                 self.place(Cell::Taken(task_id), place, task_w);
                 continue;
             }
 
             // println!(" Finding for task {}", task_id);
+            // let self_imp = imp;
             let (proc, mut task_start) = self.find_best_proc(task_w, &parents);
             // Place data transmissions -- for each parent put transmission paths
             for (parent_task_id, link_w) in parents.iter() {
@@ -281,6 +282,10 @@ impl System {
 
         self.print_planning();
     }
+
+    // fn displace(&mut self, (proc_id, tick): (ProcId, StartTime), amount: u32) {
+    //
+    // }
 
     fn place(&mut self, cell: Cell, Place { proc, tick }: Place, amount: u32) {
         {
@@ -344,18 +349,27 @@ impl System {
     }
 
     fn find_best_proc(&self, w: Weight, parents: &Vec<(TaskId, Weight)>) -> (ProcId, StartTime) {
-        let eval_proc = |proc_id: i32, start_time: StartTime| -> u32 {
-            let transmission_score: u32 = parents.iter()
+        let eval_proc = |proc_id: i32| -> u32 {
+            let transmissions: Vec<(_,_)> = parents.iter()
                 .map(|(task_id, w)| {
-                    let other_proc_id = self.start_times.get(task_id).expect("Parent not planned yet").0;
+                    let (other_proc_id, other_start, other_w) =
+                        self.start_times.get(task_id).expect("Parent not planned yet");
+                    let other_finish = other_start + other_w;
                     let dst: u32 = (proc_id - other_proc_id).abs() as u32;
-                    dst * w
+                    (dst * w, other_finish + dst * w)
                 })
-                .sum();
-                // println!("Trans {}", transmission_score);
-            self.find_consecutive_block(proc_id, w, start_time) + transmission_score * 1
+                .collect();
+                // .sum();
+            let (trans_sum, trans_last): (u32, u32) = (
+                transmissions.iter().map(|(score, _)| score).sum(),
+                *transmissions.iter().map(|(_, finish)| finish).max().unwrap_or(&0)
+            );
+            // println!("Trans {}", transmission_score);
+            // self.find_consecutive_block(proc_id, w, start_time) + transmission_score * 1
+            self.find_consecutive_block(proc_id, w, trans_last) + trans_sum
         };
 
+        // Start = max(parents_end_time)
         let start: u32 = parents.iter()
             .map(|(task_id, _)| {
                 let (_, parent_start_time, parent_w) = self.start_times.get(task_id).unwrap();
@@ -365,8 +379,9 @@ impl System {
             .unwrap();
         // println!("Start at {}", start);
 
+        // Result = proc_index with best(min) score
         ((self.leftmost_proc..=self.rightmost_proc)
-            .map(|proc| (proc, eval_proc(proc, start)))
+            .map(|proc| (proc, eval_proc(proc)))
             // .inspect(|(proc, score)| println!("Considering score={} for proc={}", score, proc))
             .min_by(|(_, score1), (_, score2)| score1.cmp(score2))
             // .map(|(proc, score)| {println!("  Settling for score={} for proc={}", score, proc); (proc, score)})
@@ -398,9 +413,9 @@ fn populate_random() -> (Vec<Vertex>, Vec<Link>) {
     let vertex_count = 8;
     let min_per_layer = 1;
     let max_per_layer = vertex_count / 2;
-    let min_vertex_weight = 1;
+    let min_vertex_weight = 3;
     let max_vertex_weight = 8;
-    let seed = [1,2,3,4, 5,6,7,8, 9,10,11,12, 13,14,15,16];
+    let seed = [6,4,4,4, 5,6,7,8, 9,10,11,12, 13,14,15,16];
     let mut rng = SmallRng::from_seed(seed);
 
     // Vertices
@@ -426,7 +441,7 @@ fn populate_random() -> (Vec<Vertex>, Vec<Link>) {
     println!("{:#?}", layers);
 
     // Links
-    let links_count = (vertex_count * (vertex_count - 1) / 2) / 2;
+    let links_count = (vertex_count * (vertex_count - 1) / 2) / 3;
     println!("Will create {} links", links_count);
     let min_link_weight = 1;
     let max_link_weight = 2;
@@ -454,8 +469,9 @@ fn populate_random() -> (Vec<Vertex>, Vec<Link>) {
     let mut done_links_count = 0;
     let mut chunks = Vec::new();
     let mut converged = false;
+    // let mut iii = 0;
     while !converged || done_links_count < links_count {
-        // if !converged { println!("Have chunks: {:#?}", chunks); }
+        // if !converged && iii < 200 { println!("Have chunks: {:#?}", chunks); iii += 1 }
         let layer_src_index = rng.gen_range(0, layers.len() - 1);
         let layer_dst_index = rng.gen_range(layer_src_index + 1, layers.len());
         let layer_src = layers.get(layer_src_index).unwrap();
@@ -473,6 +489,16 @@ fn populate_random() -> (Vec<Vertex>, Vec<Link>) {
         // Have nothing to trach if have already converged
         if converged { continue; }
 
+        let all_connected = |chunks: &Vec<Vec<u32>>| {
+            if chunks.len() == 1 {
+                let chunk = chunks.get(0).unwrap();
+                layers.iter().flatten()
+                    .map(|Vertex {id, ..}| chunk.iter().find(|&&x| &x == id).is_some())
+                    .all(|found| found)
+            } else {
+                false
+            }
+        };
         let chunk_src = belongs_to_chunk(src_index, &chunks);
         let chunk_dst = belongs_to_chunk(dst_index, &chunks);
         // println!("Have: {} and {}", src_index, dst_index);
@@ -484,10 +510,12 @@ fn populate_random() -> (Vec<Vertex>, Vec<Link>) {
             // Add src to dst_chunk
             // println!("Adding src to dst");
             chunks.get_mut(chunk_dst.unwrap()).unwrap().push(src_index);
+            if all_connected(&chunks) { converged = true; }
         } else if chunk_src.is_some() && chunk_dst.is_none() {
             // Add dst to src_chunk
             // println!("Adding dst to src");
             chunks.get_mut(chunk_src.unwrap()).unwrap().push(dst_index);
+            if all_connected(&chunks) { converged = true; }
         } else { // both Some
             let src = chunk_src.unwrap();
             let dst = chunk_dst.unwrap();
@@ -498,18 +526,9 @@ fn populate_random() -> (Vec<Vertex>, Vec<Link>) {
                 let mut other = chunks.remove(dst);
                 chunks.get_mut(if dst < src {src - 1} else {src}).unwrap().append(&mut other);
 
-                // Check if all are connected
-                if chunks.len() == 1 {
-                    let chunk = chunks.get(0).unwrap();
-                    let all_present = layers.iter().flatten()
-                        .map(|Vertex {id, ..}| chunk.iter().find(|&&x| &x == id).is_some())
-                        .all(|found| found);
-                    if all_present {
-                        converged = true;
-                    }
-                }
+                if all_connected(&chunks) { converged = true; }
             } else {
-                println!("Same, nothing");
+                // println!("Same, nothing");
             }
         }
     }
@@ -519,75 +538,75 @@ fn populate_random() -> (Vec<Vertex>, Vec<Link>) {
     (layers.into_iter().flatten().collect(), links)
 }
 
-fn populate_vertices() -> Vec<Vertex> {
-    vec![
-        Vertex {
-            id: 0,
-            w: 3,
-        },
-        Vertex {
-            id: 1,
-            w: 4,
-        },
-        Vertex {
-            id: 2,
-            w: 5,
-        },
-        Vertex {
-            id: 3,
-            w: 3,
-        },
-        Vertex {
-            id: 4,
-            w: 3,
-        },
-        Vertex {
-            id: 5,
-            w: 2,
-        },
-        Vertex {
-            id: 6,
-            w: 4,
-        },
-    ]
-}
-
-fn populate_links() -> Vec<Link> {
-    vec![
-        Link {
-            src: 0,
-            dst: 3,
-            w: 1,
-        },
-        Link {
-            src: 0,
-            dst: 2,
-            w: 2,
-        },
-        Link {
-            src: 1,
-            dst: 2,
-            w: 1,
-        },
-        Link {
-            src: 1,
-            dst: 6,
-            w: 2,
-        },
-        Link {
-            src: 3,
-            dst: 4,
-            w: 1,
-        },
-        Link {
-            src: 3,
-            dst: 5,
-            w: 2,
-        },
-        Link {
-            src: 2,
-            dst: 5,
-            w: 1,
-        },
-    ]
-}
+// fn populate_vertices() -> Vec<Vertex> {
+//     vec![
+//         Vertex {
+//             id: 0,
+//             w: 3,
+//         },
+//         Vertex {
+//             id: 1,
+//             w: 4,
+//         },
+//         Vertex {
+//             id: 2,
+//             w: 5,
+//         },
+//         Vertex {
+//             id: 3,
+//             w: 3,
+//         },
+//         Vertex {
+//             id: 4,
+//             w: 3,
+//         },
+//         Vertex {
+//             id: 5,
+//             w: 2,
+//         },
+//         Vertex {
+//             id: 6,
+//             w: 4,
+//         },
+//     ]
+// }
+//
+// fn populate_links() -> Vec<Link> {
+//     vec![
+//         Link {
+//             src: 0,
+//             dst: 3,
+//             w: 1,
+//         },
+//         Link {
+//             src: 0,
+//             dst: 2,
+//             w: 2,
+//         },
+//         Link {
+//             src: 1,
+//             dst: 2,
+//             w: 1,
+//         },
+//         Link {
+//             src: 1,
+//             dst: 6,
+//             w: 2,
+//         },
+//         Link {
+//             src: 3,
+//             dst: 4,
+//             w: 1,
+//         },
+//         Link {
+//             src: 3,
+//             dst: 5,
+//             w: 2,
+//         },
+//         Link {
+//             src: 2,
+//             dst: 5,
+//             w: 1,
+//         },
+//     ]
+// }
