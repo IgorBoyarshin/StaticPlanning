@@ -1,16 +1,16 @@
 import arcade as ARC
 
 
-SCREEN_WIDTH = 500
-SCREEN_HEIGHT = 800
+SCREEN_WIDTH = 700
+SCREEN_HEIGHT = 1000
 
-CORE_WIDTH = 40
+CORE_WIDTH = 60
 TICK_WIDTH = CORE_WIDTH
-TICK_HEIGHT = 20
+TICK_HEIGHT = 25
 
 
 class Task:
-    def __init__(self, core, start, length, index):
+    def __init__(self, core=0, start=0, length=0, index=0):
         self.core = core
         self.start = start
         self.length = length
@@ -33,10 +33,13 @@ class Task:
 
 
 class Link:
-    def __init__(self, src, dst, weight):
-        self.src = src
-        self.dst = dst
+    def __init__(self, src_core=0, dst_core=0, start=0, weight=0, src_task=0, dst_task=0):
+        self.src_core = src_core
+        self.dst_core = dst_core
         self.weight = weight
+        self.start = start
+        self.src_task = src_task
+        self.dst_task = dst_task
 
 
 def draw_field(cores, max_tick):
@@ -76,40 +79,107 @@ def draw_task(task):
     ARC.draw_xywh_rectangle_outline(x1, y1, w, h, ARC.color.BLACK, 4)
     ARC.draw_text(str(task.index),
             x1 + CORE_WIDTH/2,
-            y1 + (task.length / 2) * TICK_HEIGHT,
+            y1 + (int(task.length / 2)+1) * TICK_HEIGHT,
             ARC.color.BLACK, 12, anchor_x="left", anchor_y="bottom")
 
 
 def draw_line(line, tasks):
-    x1,y1 = tasks[line.src].bottom_left()
-    x1 = x1 + TICK_WIDTH/2
-    x2,y2 = tasks[line.dst].upper_right()
-    x2 = x2 - TICK_WIDTH/2
-    ARC.draw_line(x1,y1,x2,y2, ARC.color.RED, 3)
-    ARC.draw_text(str(line.weight), (x1+x2)/2, (y1+y2)/2, ARC.color.BLUE, 14)
+    x1 = CORE_WIDTH * line.src_core + CORE_WIDTH/2
+    y1 = SCREEN_HEIGHT - (CORE_WIDTH + (line.start-1) * TICK_HEIGHT)
+    x2 = CORE_WIDTH * line.dst_core + CORE_WIDTH/2
+    y2 = SCREEN_HEIGHT - (CORE_WIDTH + (line.start+line.weight-1) * TICK_HEIGHT)
+    ARC.draw_line(x1,y1,x2,y2, ARC.color.RED, 4)
+    ARC.draw_text(str(line.src_task) + "-" + str(line.dst_task), (x1+x2)/2, (y1+y2)/2, ARC.color.GREEN, 14)
+    ARC.draw_point(x1, y1, ARC.color.BLUE, 6)
+    ARC.draw_point(x2, y2, ARC.color.BLUE, 6)
+
+
+def amount_cores_ticks(tasks):
+    max_core = 1
+    max_tick = 1
+    for task in tasks:
+        if task.core > max_core:
+            max_core = task.core
+        finish = task.start + task.length
+        if finish > max_tick:
+            max_tick = finish
+    return max_core,(max_tick-1)
 
 
 def draw(tasks, connections):
-    draw_field(4, 20)
+    cores,ticks = amount_cores_ticks(tasks)
+    draw_field(cores, ticks)
     for task in tasks:
         draw_task(task)
     for line in connections:
         draw_line(line, tasks)
-    # ARC.draw_point(20, y, ARC.color.BLUE, 10)
+
+
+def read_from_file(path):
+    in_task = False
+    in_link = False
+    current_object = None
+    tasks = []
+    links = []
+    for line in [line.rstrip('\n') for line in open(path)]:
+        if line == "OutTask":
+            if in_task:
+                tasks.append(current_object)
+            elif in_link:
+                links.append(current_object)
+            in_task = True
+            in_link = False
+            current_object = Task()
+        elif line == "OutLink":
+            if in_task:
+                tasks.append(current_object)
+            elif in_link:
+                links.append(current_object)
+            in_task = False
+            in_link = True
+            current_object = Link()
+        else:
+            parts = line.split(':')
+            field = parts[0]
+            data  = parts[1]
+            if in_task:
+                if field == "weight":
+                    current_object.length = int(data)
+                elif field == "start":
+                    current_object.start = int(data)
+                elif field == "proc":
+                    current_object.core = int(data)
+                elif field == "id":
+                    current_object.index = int(data)
+            elif in_link:
+                if field == "src_core":
+                    current_object.src_core = int(data)
+                elif field == "dst_core":
+                    current_object.dst_core = int(data)
+                elif field == "weight":
+                    current_object.weight = int(data)
+                elif field == "start":
+                    current_object.start = int(data)
+                elif field == "src_task":
+                    current_object.src_task = int(data)
+                elif field == "dst_task":
+                    current_object.dst_task = int(data)
+    # The final one
+    if in_task:
+        tasks.append(current_object)
+    elif in_link:
+        links.append(current_object)
+
+    return tasks,links
+
 
 
 def main():
+    tasks,links = read_from_file("planning.txt")
     ARC.open_window(SCREEN_WIDTH, SCREEN_HEIGHT, "Static Planning")
-    ARC.set_background_color(ARC.color.WHITE)
+    ARC.set_background_color(ARC.color.BATTLESHIP_GREY)
     ARC.start_render()
-
-    tasks = []
-    tasks.append(Task(3,1, 4, 0))
-    tasks.append(Task(1,6, 3, 1))
-    connections = []
-    connections.append(Link(0,1, 4))
-    draw(tasks, connections)
-
+    draw(tasks, links)
     ARC.finish_render()
     ARC.run()
 

@@ -1,9 +1,9 @@
 use std::collections::HashMap;
-use std::fmt;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 
 extern crate rand;
 use rand::prelude::*;
-// use rand::rngs::StdRng;
 
 #[derive(Debug)]
 struct Vertex {
@@ -17,35 +17,14 @@ struct Link {
     w: Weight,
 }
 
-// #[derive(PartialEq, Eq, Ord, PartialOrd)]
-
 type VertId = u32;
 type ProcId = i32;
 type Tick = u32;
 type TaskId = u32;
-type StartTime = u32;
 type Weight = u32;
 type Importance = u32;
 
-#[derive(PartialEq, Eq, Clone)]
-enum Cell {
-    Free,
-    Taken(TaskId),
-    Snd(TaskId),
-    Rcv(TaskId),
-}
-
-impl fmt::Display for Cell {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Cell::Free => write!(f, "____"),
-            Cell::Taken(id) => write!(f, "#{:2}#", id),
-            Cell::Snd(id) => write!(f, "-{:2}-", id),
-            Cell::Rcv(id) => write!(f, "+{:2}+", id),
-        }
-    }
-}
-
+#[derive(Debug)]
 struct Task {
     id: TaskId,
     w: Weight,
@@ -114,6 +93,7 @@ fn tasks_from(vertices: Vec<Vertex>, links: Vec<Link>) -> Vec<Task> {
     tasks
 }
 
+
 fn print_tasks(tasks: &Vec<Task>) {
     for Task {id, w, children, parents, imp} in tasks.iter() {
         println!("Task #{} [{}] <{}>:", id, w, imp);
@@ -130,277 +110,294 @@ fn print_tasks(tasks: &Vec<Task>) {
     }
 }
 
-struct Place {
-    proc: ProcId,
-    tick: Tick,
+fn main() {
+    let (vertices, links) = populate_random();
+    // let (vertices, links) = (populate_vertices(), populate_links());
+    let tasks = tasks_from(vertices, links);
+    print_tasks(&tasks);
+    let mut s = System::new(tasks);
+    s.plan();
+    s.export("planning.txt".to_string());
 }
+
+
+struct OutTask {
+    start: Tick,
+    proc: ProcId,
+    weight: Weight,
+    id: TaskId,
+}
+
+#[derive(Debug)]
+struct OutLink {
+    src_core: ProcId,
+    dst_core: ProcId,
+    start: Tick,
+    weight: Weight,
+    src_task: TaskId,
+    dst_task: TaskId,
+}
+
+impl OutLink {
+    fn serialize(&self, leftmost_proc: &ProcId) -> String {
+        let mut s = "OutLink\n".to_string();
+
+        s += "src_core:";
+        s += &(self.src_core - leftmost_proc).to_string();
+        s += "\n";
+
+        s += "dst_core:";
+        s += &(self.dst_core - leftmost_proc).to_string();
+        s += "\n";
+
+        s += "weight:";
+        s += &self.weight.to_string();
+        s += "\n";
+
+        s += "start:";
+        s += &(self.start + 1).to_string();
+        s += "\n";
+
+        s += "src_task:";
+        s += &self.src_task.to_string();
+        s += "\n";
+
+        s += "dst_task:";
+        s += &self.dst_task.to_string();
+        s += "\n";
+
+        s
+    }
+}
+
+impl OutTask {
+    fn serialize(&self, leftmost_proc: &ProcId) -> String {
+        let mut s = "OutTask\n".to_string();
+
+        s += "start:";
+        s += &(self.start + 1).to_string();
+        s += "\n";
+
+        s += "proc:";
+        s += &(self.proc - leftmost_proc).to_string();
+        s += "\n";
+
+        s += "weight:";
+        s += &self.weight.to_string();
+        s += "\n";
+
+        s += "id:";
+        s += &self.id.to_string();
+        s += "\n";
+
+        s
+    }
+}
+
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
+struct ProcPair {
+    left: ProcId,
+    right: ProcId,
+}
+
+impl ProcPair {
+    fn new(left: ProcId, right: ProcId) -> ProcPair {
+        if left < right { ProcPair {left: left,  right: right} }
+        else            { ProcPair {left: right, right: left}  }
+    }
+}
+
+fn clone_buses(buses: &Buses) -> Buses {
+    let mut new_buses = HashMap::new();
+    for (proc_pair, tick) in buses.iter() {
+        new_buses.insert(proc_pair.clone(), tick.clone());
+    }
+    new_buses
+}
+
+// proc -> first free tick
+type Processors = HashMap<ProcId, Tick>;
+// leftproc
+type Buses = HashMap<ProcPair, Tick>;
+// where the tasks was planned and where it finished
+type PlannedTasks = HashMap<TaskId, (ProcId, Tick)>;
+
 
 struct System {
-    processors: HashMap<ProcId, Vec<Cell>>,
     unplanned_tasks: Vec<Task>,
+    out_tasks: Vec<OutTask>,
+    out_links: Vec<OutLink>,
     leftmost_proc: ProcId,
     rightmost_proc: ProcId,
-    start_times: HashMap<TaskId, (ProcId, StartTime, Weight)>,
+    processors: Processors,
+    buses: Buses,
+    planned_tasks: PlannedTasks,
 }
 
+#[derive(Debug)]
+struct Scenario {
+    proc: ProcId,
+    buses: Buses,
+    start: Tick,
+    new_links: Vec<OutLink>,
+    score: u32,
+}
+
+
+fn gen_paths(src: ProcId, dst: ProcId) -> Vec<(ProcId, ProcId)> {
+    if src < dst { (src..dst).map(|x| (x, x+1))      .collect() }
+    else         { (dst..src).map(|x| (x+1, x)).rev().collect() }
+}
+
+
 impl System {
-    fn print_planning(&self) {
-        // Header
-        println!();
-        print!("======||");
-        for _ in 1..=(self.rightmost_proc - self.leftmost_proc - 1) {
-            print!("======|");
-        }
-        println!();
-        print!(" Tick ||");
-        for i in (self.leftmost_proc + 1)..self.rightmost_proc {
-            print!("  {:2}  |", i);
-        }
-        println!();
-        print!("======||");
-        for _ in 1..=(self.rightmost_proc - self.leftmost_proc - 1) {
-            print!("======|");
-        }
+    fn export(&self, path: String) {
+        let f = File::create(path).expect("Unable to create file");
+        let mut f = BufWriter::new(f);
 
-        // Content
-        let mut index = 0;
-        let mut finished = false;
-        while !finished {
-            println!();
-            finished = true; // until proven otherwise
-            print!("[ {:3}]||", index);
-            // let mut prev: Option<Cell> = None;
-            let mut prev_for_me = false;
-            for proc in (self.leftmost_proc + 1)..self.rightmost_proc {
-                let processor = &self.processors[&proc];
-                let cell = if index >= processor.len() {
-                    Cell::Free
-                } else {
-                    finished = false;
-                    processor[index].clone()
-                };
-                if let Cell::Snd(task) = cell {
-                    if prev_for_me {
-                        print!(" <{:2}< |", task);
-                    } else {
-                        print!(" >{:2}> |", task);
-                    }
-                    prev_for_me = !prev_for_me;
-                } else if let Cell::Rcv(task) = cell {
-                    if prev_for_me {
-                        print!(" >{:2}> |", task);
-                    } else {
-                        print!(" <{:2}< |", task);
-                    }
-                    prev_for_me = !prev_for_me;
-                } else {
-                    print!(" {} |", cell);
-                }
-            }
-            index += 1;
-        }
-        println!(" ===== Total ticks");
-    }
-
-    fn new(tasks: Vec<Task>) -> System {
-        let mut map: HashMap<ProcId, Vec<Cell>> = HashMap::new();
-        map.insert(0, Vec::new());
-
-        System {
-            leftmost_proc: 0,
-            rightmost_proc: 0,
-            processors: map,
-            unplanned_tasks: tasks,
-            start_times: HashMap::new(),
-        }
+        self.out_tasks.iter().for_each(|task|
+            f.write_all(task.serialize(&self.leftmost_proc).as_bytes())
+                .expect("Unable to write data"));
+        self.out_links.iter().for_each(|link|
+            f.write_all(link.serialize(&self.leftmost_proc).as_bytes())
+                .expect("Unable to write data"));
     }
 
     fn plan(&mut self) {
-        while self.unplanned_tasks.len() > 0 {
-            let Task {id: task_id, w: task_w, parents, ..} = self.rmv_earliest();
-            // No parents => can start immediately => into a new processor
-            if parents.is_empty() {
-                let place = Place {proc: self.rightmost_proc.clone(), tick: 0};
-                self.place(Cell::Taken(task_id), place, task_w);
-                continue;
-            }
-
-            // println!(" Finding for task {}", task_id);
-            let (proc, mut task_start) = self.find_best_proc(task_w, &parents);
-            // Place data transmissions -- for each parent put transmission paths
-            for (parent_task_id, link_w) in parents.iter() {
-                let (parent_proc, parent_start, parent_w) =
-                    self.start_times.get(parent_task_id).unwrap().clone();
-                if proc == parent_proc {
-                    continue; // on the same processor => nothing to transmit
-                }
-                // Hot to get from parent to proc
-                let paths: Vec<(i32, i32)> = {
-                    let left_to_right = parent_proc < proc;
-                    let pairs = (if parent_proc < proc
-                                 {(parent_proc..proc)}
-                            else {(proc..parent_proc)})
-                        .map(|x| if left_to_right {(x, x+1)} else {(x+1, x)});
-                    if left_to_right {pairs.collect()} else {pairs.rev().collect()}
-                };
-                // Plan (put) paths
-                let mut tick = (parent_start + parent_w) as usize;
-                for (src, dst) in paths.into_iter() {
-                    loop { // Until we find an empty slot
-                        let mut found = true;
-                        for t in tick..(tick + *link_w as usize) {
-                            let processor_src = self.processors.get(&src).unwrap();
-                            if let Cell::Free = processor_src.get(t).unwrap_or(&Cell::Free) {
-                                let processor_dst = self.processors.get(&dst).unwrap();
-                                if let Cell::Free = processor_dst.get(t).unwrap_or(&Cell::Free) {
-                                    continue;
-                                }
-                            }
-                            // At least for one _t_ couldn't find Free => failed for this _tick_
-                            found = false;
-                            break;
-                        };
-                        if found {break};
-                        tick += 1;
-                    }
-                    // Actually place the transmission
-                    self.place(Cell::Snd(task_id), Place {proc: src, tick: tick as u32}, *link_w);
-                    self.place(Cell::Rcv(task_id), Place {proc: dst, tick: tick as u32}, *link_w);
-
-                    tick += *link_w as usize;
-                }
-                // _tick_ now contains the tick when the data transmission from
-                // current parent has ended. The actual start time is thus the max
-                // of all such _tick_s.
-                task_start = std::cmp::max(task_start, tick as u32);
-            }
-
-            // Have received all data for this task => can start it
-            self.place(Cell::Taken(task_id), Place {proc: proc, tick: task_start}, task_w);
+        while let Some(task) = self.pop_next() {
+            // println!("Working with {:?}", task);
+            let Scenario {proc, buses, start, mut new_links, ..} =
+                (self.leftmost_proc..=self.rightmost_proc)
+                .map(|proc| self.play_scenario(proc, &task))
+                // .inspect(|scenario| println!("      Considering {:#?}", scenario))
+                .min_by_key(|scenario| scenario.score)
+                .unwrap();
+            self.buses = buses;
+            self.out_links.append(&mut new_links);
+            self.out_tasks.push(OutTask {
+                start,
+                proc,
+                weight: task.w,
+                id: task.id,
+            });
+            self.processors.insert(proc, start + task.w);
+            self.planned_tasks.insert(task.id, (proc, start + task.w));
+            self.enlarge_if_needed(proc);
         }
-
-        self.print_planning();
     }
 
-    fn place(&mut self, cell: Cell, Place { proc, tick }: Place, amount: u32) {
-        {
-            let processor = self.processors.get_mut(&proc).unwrap();
-            while (processor.len() as u32) < tick {
-                // create cells up to _tick_
-                processor.push(Cell::Free);
-            }
-            let mut start = tick;
-            while processor.get(start as usize).unwrap_or(&Cell::Free) != &Cell::Free {
-                start += 1; // find first empty spacce (or the end, which is empty as well)
-            }
-
-            for curr in start..(start + amount) {
-                // let processor = self.processors.get_mut(&proc).unwrap();
-                let cell = cell.clone();
-
-                if curr >= (processor.len() as u32) {
-                    processor.push(cell);
-                } else {
-                    processor[curr as usize] = cell;
-                }
-            }
-        }
-
-        if let Cell::Taken(task_id) = cell {
-            self.start_times.insert(task_id, (proc, tick, amount));
-        }
-
-        // Add one processor to the left and one processor to the right, if needed
+    fn enlarge_if_needed(&mut self, proc: ProcId) {
         if proc == self.leftmost_proc {
             self.leftmost_proc -= 1;
-            self.processors.insert(self.leftmost_proc, Vec::new());
+            self.processors.insert(self.leftmost_proc, 0);
+            self.buses.insert(ProcPair::new(self.leftmost_proc, self.leftmost_proc + 1), 0);
         }
         if proc == self.rightmost_proc {
             self.rightmost_proc += 1;
-            self.processors.insert(self.rightmost_proc, Vec::new());
+            self.processors.insert(self.rightmost_proc, 0);
+            self.buses.insert(ProcPair::new(self.rightmost_proc, self.rightmost_proc - 1), 0);
         }
     }
 
-    fn find_consecutive_block(&self, proc: ProcId, w: Weight, s: StartTime) -> StartTime {
-        let processor = self.processors.get(&proc).unwrap();
-        if s as usize >= processor.len() {return s;}
+    fn finish_of(&self, task: &TaskId) -> Tick {
+        let (_, tick) = self.planned_tasks.get(task).unwrap();
+        tick.clone()
+    }
 
-        for i in (s as usize)..processor.len() {
-            if let Cell::Free = processor.get(i).unwrap() {
-                let mut all_good = true;
-                for ii in (i + 1)..(i + w as usize) {
-                    if let Cell::Free = processor.get(ii).unwrap_or(&Cell::Free) {
-                        continue;
-                    } else {
-                        all_good = false;
-                        break;
-                    }
+    fn proc_of(&self, task: &TaskId) -> ProcId {
+        let (proc, _) = self.planned_tasks.get(task).unwrap();
+        proc.clone()
+    }
+
+    fn bus_finish_of(&self, src: &ProcId, dst: &ProcId, buses: &Buses) -> Tick {
+        buses.get(&ProcPair::new(src.clone(), dst.clone())).unwrap().clone()
+    }
+
+    fn play_scenario(&self, proc: ProcId, task: &Task) -> Scenario {
+        let mut buses = clone_buses(&self.buses);
+        let (transmission_finish, new_links): (Tick, Vec<OutLink>) = task.parents.iter()
+            .filter(|(parent, _)| self.proc_of(parent) != proc)
+            .map(|(parent, weight)| {
+                let (transmission_finish, new_links) = gen_paths(self.proc_of(&parent), proc).into_iter()
+                    .fold((self.finish_of(&parent), Vec::new()),
+                            |(src_finish, mut links), (src_core, dst_core)| {
+                        let start = std::cmp::max(
+                            src_finish,
+                            // work upon the being updated buses
+                            self.bus_finish_of(&src_core, &dst_core, &buses)
+                        );
+                        links.push(OutLink {
+                            src_core,
+                            dst_core,
+                            start: start.clone(),
+                            weight: weight.clone(),
+                            src_task: parent.clone(),
+                            dst_task: task.id.clone(),
+                        });
+                        (start + weight.clone(), links)
+                    });
+                // Imprint these links, so that all consequent paths of links
+                // work upon the updated buses.
+                for OutLink {src_core, dst_core, start, weight, ..} in new_links.iter() {
+                    buses.insert(
+                        ProcPair::new(src_core.clone(), dst_core.clone()),
+                        (start + weight).clone());
                 }
-                if all_good { return i as u32; }
-            }
-        }
-
-        (processor.len() as u32)
-    }
-
-    fn find_best_proc(&self, w: Weight, parents: &Vec<(TaskId, Weight)>) -> (ProcId, StartTime) {
-        let eval_proc = |proc_id: i32, start_time: StartTime| -> u32 {
-            let transmission_score: u32 = parents.iter()
-                .map(|(task_id, w)| {
-                    let other_proc_id = self.start_times.get(task_id).expect("Parent not planned yet").0;
-                    let dst: u32 = (proc_id - other_proc_id).abs() as u32;
-                    dst * w
-                })
-                .sum();
-                // println!("Trans {}", transmission_score);
-            self.find_consecutive_block(proc_id, w, start_time) + transmission_score * 1
-        };
-
-        let start: u32 = parents.iter()
-            .map(|(task_id, _)| {
-                let (_, parent_start_time, parent_w) = self.start_times.get(task_id).unwrap();
-                parent_start_time + parent_w
+                (transmission_finish, new_links)
             })
-            .max()
-            .unwrap();
-        // println!("Start at {}", start);
+            .fold((0, Vec::new()), |(finish, mut links), (cur_finish, mut cur_links)| {
+                links.append(&mut cur_links);
+                (std::cmp::max(finish, cur_finish), links)
+            });
 
-        ((self.leftmost_proc..=self.rightmost_proc)
-            .map(|proc| (proc, eval_proc(proc, start)))
-            // .inspect(|(proc, score)| println!("Considering score={} for proc={}", score, proc))
-            .min_by(|(_, score1), (_, score2)| score1.cmp(score2))
-            // .map(|(proc, score)| {println!("  Settling for score={} for proc={}", score, proc); (proc, score)})
-            .map(|(index, _)| index)
-            .unwrap() as i32,
-        start)
+        let free_on_proc = self.processors.get(&proc).unwrap();
+        let start = std::cmp::max(free_on_proc, &transmission_finish).clone();
+        Scenario {
+            score: start.clone(),
+            start,
+            new_links,
+            buses,
+            proc,
+        }
     }
 
-    fn rmv_earliest(&mut self) -> Task {
-        self.unplanned_tasks.remove(0)
-        // let max = self.unplanned_tasks.iter()
-        //     .enumerate()
-        //     .max_by_key(|(_, Task {imp, ..})| imp)
-        //     .map(|(index, _)| index)
-        //     .unwrap();
-        // self.unplanned_tasks.remove(max)
+    fn new(tasks: Vec<Task>) -> System {
+        let mut processors = HashMap::new();
+        processors.insert(0, 0);
+        System {
+            unplanned_tasks: tasks,
+            out_tasks: vec![],
+            out_links: vec![],
+            leftmost_proc: 0,
+            rightmost_proc: 0,
+            processors: processors,
+            buses: HashMap::new(),
+            planned_tasks: HashMap::new(),
+        }
+    }
+
+    fn pop_next(&mut self) -> Option<Task> {
+        if self.unplanned_tasks.is_empty() { None }
+        else {
+            let (index, _) = self.unplanned_tasks.iter().enumerate()
+                .max_by_key(|(_, Task {imp, ..})| imp)
+                .unwrap();
+            Some(self.unplanned_tasks.remove(index))
+        }
+        // if self.unplanned_tasks.len() > 0
+        //      { Some(self.unplanned_tasks.remove(0)) }
+        // else { None }
     }
 }
 
-fn main() {
-    // let (vert, links) = populate_random();
-    // let tasks = tasks_from(vert, links);
-    // print_tasks(&tasks);
-    // System::new(tasks).plan();
-    System::new(tasks_from(populate_vertices(), populate_links())).plan();
-}
 
 fn populate_random() -> (Vec<Vertex>, Vec<Link>) {
-    let vertex_count = 8;
-    let min_per_layer = 1;
+    let vertex_count = 15;
+    let min_per_layer = 2;
     let max_per_layer = vertex_count / 2;
-    let min_vertex_weight = 1;
+    let min_vertex_weight = 2;
     let max_vertex_weight = 8;
-    let seed = [1,2,3,4, 5,6,7,8, 9,10,11,12, 13,14,15,16];
+    let seed = [6,4,3,8, 7,9,8,10, 14,18,12,12, 14,15,16,17];
     let mut rng = SmallRng::from_seed(seed);
 
     // Vertices
@@ -423,24 +420,14 @@ fn populate_random() -> (Vec<Vertex>, Vec<Link>) {
 
         layers.push(layer);
     }
-    println!("{:#?}", layers);
+    // println!("{:#?}", layers);
 
     // Links
-    let links_count = (vertex_count * (vertex_count - 1) / 2) / 2;
-    println!("Will create {} links", links_count);
+    let links_count = (vertex_count * (vertex_count - 1) / 2) / 10;
+    // println!("Will create {} links", links_count);
     let min_link_weight = 1;
-    let max_link_weight = 2;
+    let max_link_weight = 3;
     let mut links = Vec::new();
-    // There must be at least one path with a Vertex in each layer.
-    // Gen that path. Since all vertices are random,
-    // can just take 0th at each layer at this stage
-    // for i in 1..layers.len() {
-    //     let src_index = layers.get(i - 1).unwrap().get(0).unwrap().id.clone();
-    //     let dst_index = layers.get(i    ).unwrap().get(0).unwrap().id.clone();
-    //     let weight: u32 = rng.gen_range(min_link_weight, max_link_weight + 1);
-    //     links.push(Link { src: src_index, dst: dst_index, w: weight });
-    // }
-    // let mut done_links_count = layers.len() - 1;
     let belongs_to_chunk = |id: u32, chunks: &Vec<Vec<VertId>>| -> Option<usize> {
         chunks.iter()
             .enumerate()
@@ -463,6 +450,7 @@ fn populate_random() -> (Vec<Vertex>, Vec<Link>) {
         let src_index = layer_src.get(rng.gen_range(0, layer_src.len())).unwrap().id.clone();
         let dst_index = layer_dst.get(rng.gen_range(0, layer_dst.len())).unwrap().id.clone();
         // Retry if such link already exists
+
         if links.iter()
             .find(|&& Link {src, dst, ..}| (src == src_index) && (dst == dst_index))
             .is_some() { continue; }
@@ -497,24 +485,18 @@ fn populate_random() -> (Vec<Vertex>, Vec<Link>) {
                 // Merge chunks
                 let mut other = chunks.remove(dst);
                 chunks.get_mut(if dst < src {src - 1} else {src}).unwrap().append(&mut other);
-
-                // Check if all are connected
-                if chunks.len() == 1 {
-                    let chunk = chunks.get(0).unwrap();
-                    let all_present = layers.iter().flatten()
-                        .map(|Vertex {id, ..}| chunk.iter().find(|&&x| &x == id).is_some())
-                        .all(|found| found);
-                    if all_present {
-                        converged = true;
-                    }
-                }
+                // converted=true was here
             } else {
-                println!("Same, nothing");
+                // println!("Same, nothing");
             }
+        }
+        // Check if all are connected
+        if chunks.len() == 1 && chunks[0].len() == vertex_count as usize {
+            converged = true;
         }
     }
 
-    println!("Done {} links total", done_links_count);
+    // println!("Done {} links total", done_links_count);
 
     (layers.into_iter().flatten().collect(), links)
 }
