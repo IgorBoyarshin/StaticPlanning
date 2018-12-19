@@ -96,15 +96,15 @@ fn tasks_from(vertices: Vec<Vertex>, links: Vec<Link>) -> Vec<Task> {
 
 fn print_tasks(tasks: &Vec<Task>) {
     for Task {id, w, children, parents, imp} in tasks.iter() {
-        println!("Task #{} [{}] <{}>:", id, w, imp);
+        println!("Task #{} [{}] <{}>:", id+1, w, imp);
         print!("\t->");
         for (dst, w) in children.iter() {
-            print!(" #{}[{}]", dst, w);
+            print!(" #{}[{}]", dst+1, w);
         }
         println!();
         print!("\t<-");
         for (src, w) in parents.iter() {
-            print!(" #{}[{}]", src, w);
+            print!(" #{}[{}]", src+1, w);
         }
         println!();
     }
@@ -215,8 +215,8 @@ fn clone_buses(buses: &Buses) -> Buses {
     new_buses
 }
 
-// proc -> first free tick
-type Processors = HashMap<ProcId, Tick>;
+// proc -> vec<is_busy>
+type Processors = HashMap<ProcId, Vec<bool>>;
 // leftproc
 type Buses = HashMap<ProcPair, Tick>;
 // where the tasks was planned and where it finished
@@ -280,21 +280,36 @@ impl System {
                 weight: task.w,
                 id: task.id,
             });
-            self.processors.insert(proc, start + task.w);
+            self.place_at_proc(&proc, &start, &task.w);
             self.planned_tasks.insert(task.id, (proc, start + task.w));
             self.enlarge_if_needed(proc);
+        }
+    }
+
+    fn place_at_proc(&mut self, proc: &ProcId, start: &Tick, w: &Weight) {
+        let start = start.clone();
+        let length = self.processors[proc].len();
+        for _i in length..(start as usize) { // if start > length
+            self.processors.get_mut(proc).unwrap().push(false);
+        }
+        let length = self.processors[proc].len();
+        for i in (start as usize)..length {
+            self.processors.get_mut(proc).unwrap()[i] = true;
+        }
+        for _i in length..((start+w) as usize) {
+            self.processors.get_mut(proc).unwrap().push(true);
         }
     }
 
     fn enlarge_if_needed(&mut self, proc: ProcId) {
         if proc == self.leftmost_proc {
             self.leftmost_proc -= 1;
-            self.processors.insert(self.leftmost_proc, 0);
+            self.processors.insert(self.leftmost_proc, Vec::new());
             self.buses.insert(ProcPair::new(self.leftmost_proc, self.leftmost_proc + 1), 0);
         }
         if proc == self.rightmost_proc {
             self.rightmost_proc += 1;
-            self.processors.insert(self.rightmost_proc, 0);
+            self.processors.insert(self.rightmost_proc, Vec::new());
             self.buses.insert(ProcPair::new(self.rightmost_proc, self.rightmost_proc - 1), 0);
         }
     }
@@ -350,8 +365,9 @@ impl System {
                 (std::cmp::max(finish, cur_finish), links)
             });
 
-        let free_on_proc = self.processors.get(&proc).unwrap();
-        let start = std::cmp::max(free_on_proc, &transmission_finish).clone();
+        let start = self.find_consecutive_block(&proc, &transmission_finish, task.w.clone());
+        print!("Found block with w={} starting at {}", task.w, start);
+        // let start = std::cmp::max(free_on_proc, &transmission_finish).clone();
         Scenario {
             score: start.clone(),
             start,
@@ -361,9 +377,29 @@ impl System {
         }
     }
 
+    fn find_consecutive_block(&self, proc_id: &ProcId, starting_tick: &Tick, w: Weight) -> Tick {
+        let proc = &self.processors[proc_id];
+        let mut cur: Tick = starting_tick.clone();
+        loop {
+            if cur as usize >= proc.len() { return cur; }
+            if !proc[cur as usize] { // is free
+                let mut succ = true;
+                for i in cur..cur+w {
+                    if i as usize >= proc.len() { break; }
+                    if proc[i as usize] { // is busy
+                        succ = false;
+                        break;
+                    }
+                }
+                if succ { return cur; }
+            }
+            cur += 1;
+        };
+    }
+
     fn new(tasks: Vec<Task>) -> System {
         let mut processors = HashMap::new();
-        processors.insert(0, 0);
+        processors.insert(0, Vec::new());
         System {
             unplanned_tasks: tasks,
             out_tasks: vec![],
