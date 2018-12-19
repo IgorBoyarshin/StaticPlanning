@@ -366,7 +366,7 @@ impl System {
             });
 
         let start = self.find_consecutive_block(&proc, &transmission_finish, task.w.clone());
-        print!("Found block with w={} starting at {}", task.w, start);
+        // print!("Found block with w={} starting at {}", task.w, start);
         // let start = std::cmp::max(free_on_proc, &transmission_finish).clone();
         Scenario {
             score: start.clone(),

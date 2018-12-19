@@ -70,14 +70,14 @@ def draw_field(cores, max_tick):
                     ARC.color.BLACK, 12, anchor_x="left", anchor_y="top")
 
 
-# 1-based indexing
+# 0-based indexing
 def draw_task(task):
     x1,y1 = task.bottom_left()
     x2,y2 = task.upper_right()
     w,h = x2-x1, y2-y1
     ARC.draw_xywh_rectangle_filled(x1, y1, w, h, ARC.color.HELIOTROPE_GRAY)
     ARC.draw_xywh_rectangle_outline(x1, y1, w, h, ARC.color.BLACK, 4)
-    ARC.draw_text(str(task.index),
+    ARC.draw_text(str(task.index + 1),
             x1 + CORE_WIDTH/2,
             y1 + (int(task.length / 2)+1) * TICK_HEIGHT,
             ARC.color.BLACK, 12, anchor_x="left", anchor_y="bottom")
