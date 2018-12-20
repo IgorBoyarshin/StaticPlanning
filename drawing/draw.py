@@ -89,7 +89,7 @@ def draw_line(line, tasks):
     x2 = CORE_WIDTH * line.dst_core + CORE_WIDTH/2
     y2 = SCREEN_HEIGHT - (CORE_WIDTH + (line.start+line.weight-1) * TICK_HEIGHT)
     ARC.draw_line(x1,y1,x2,y2, ARC.color.RED, 4)
-    ARC.draw_text(str(line.src_task) + "-" + str(line.dst_task), (x1+x2)/2, (y1+y2)/2, ARC.color.GREEN, 14)
+    ARC.draw_text(str(line.src_task+1) + "-" + str(line.dst_task+1), (x1+x2)/2, (y1+y2)/2, ARC.color.GREEN, 14)
     ARC.draw_point(x1, y1, ARC.color.BLUE, 6)
     ARC.draw_point(x2, y2, ARC.color.BLUE, 6)
 
